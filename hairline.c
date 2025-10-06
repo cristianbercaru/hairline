@@ -1,182 +1,186 @@
-#include <string.h>
-
 #include <gtk/gtk.h>
 #include <gst/gst.h>
 
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#endif
+typedef enum {
+    NO_ERROR = 0,
+    ERROR = -1
+} errcode;
 
-#include <gdk/gdk.h>
+static inline void unref (gpointer object) {
+    if (object != NULL)
+        gst_object_unref (object);
+}
 
 /* Structure to contain all our information, so we can pass it around */
-typedef struct _CustomData
-{
-    GstElement *playbin;                    /* Our one and only pipeline */
-    GstElement *invert;
-    GtkWidget *sink_widget;             /* The widget where our video will be displayed */
-    GtkWidget *slider;                        /* Slider widget to keep track of current position */
-    GtkWidget *streams_list;            /* Text widget to display info about the streams */
-    gulong slider_update_signal_id;             /* Signal ID for the slider update signal */
-
-    GstState state;                             /* Current state of the pipeline */
-    gint64 duration;                            /* Duration of the clip, in nanoseconds */
+typedef struct _CustomData {
+    GstElement *pipeline;    /* The main pipeline */
+    GstElement *flip;        /* Handle of flip plugin */
+    GstElement *invert;      /* Handle of invert plugin */
+    GtkWidget  *sink_widget; /* Widget where video will be displayed */
 } CustomData;
 
-/* This function is called when the PLAY button is clicked */
-static void
-play_cb (GtkButton * button, CustomData * data)
-{
-    gst_element_set_state (data->playbin, GST_STATE_PLAYING);
+/* Use videoflip plugin to flip and rotate the image based on the current position
+   0 = Identity, no rotation
+   1 = Rotate clockwise 90 degrees
+   2 = Rotate 180 degrees
+   3 = Rotate counter-clockwise 90 degrees
+   4 = Flip horizontally
+   5 = Flip vertically
+   6 = Flip across upper left/lower right diagonal
+   7 = Flip across upper right/lower left diagonal
+ */
+
+/* Horizontal flip */
+static void cb_flip_h (GtkButton * button, GstElement * flip) {
+    gint method, new_method;
+
+    g_object_get (flip, "method", &method, NULL);
+    switch (method) {
+        case 0:  new_method = 4; break;
+        case 1:  new_method = 6; break;
+        case 2:  new_method = 5; break;
+        case 3:  new_method = 7; break;
+        case 4:  new_method = 0; break;
+        case 5:  new_method = 2; break;
+        case 6:  new_method = 1; break;
+        case 7:  new_method = 3; break;
+        default: new_method = 0;
+    }
+    g_object_set (flip, "method", new_method, NULL);
 }
 
-/* This function is called when the PAUSE button is clicked */
-static void
-pause_cb (GtkButton * button, CustomData * data)
-{
-    //gst_element_set_state (data->playbin, GST_STATE_PAUSED);
-    g_object_set (data->invert, "preset", 3, NULL);
-    //gst_element_set_state (data->playbin, GST_STATE_PLAYING);
+/* Vertical flip */
+static void cb_flip_v (GtkButton * button, GstElement * flip) {
+    gint method, new_method;
+
+    g_object_get (flip, "method", &method, NULL);
+    switch (method) {
+        case 0:  new_method = 5; break;
+        case 1:  new_method = 7; break;
+        case 2:  new_method = 4; break;
+        case 3:  new_method = 6; break;
+        case 4:  new_method = 2; break;
+        case 5:  new_method = 0; break;
+        case 6:  new_method = 3; break;
+        case 7:  new_method = 1; break;
+        default: new_method = 0;
+    }
+    g_object_set (flip, "method", new_method, NULL);
 }
 
-/* This function is called when the STOP button is clicked */
-static void
-stop_cb (GtkButton * button, CustomData * data)
-{
-    gst_element_set_state (data->playbin, GST_STATE_READY);
+/* Rotate clockwise 90 degrees */
+static void cb_rotate_cw (GtkButton * button, GstElement * flip) {
+    gint method, new_method;
+
+    g_object_get (flip, "method", &method, NULL);
+    switch (method) {
+        case 0:  new_method = 1; break;
+        case 1:  new_method = 2; break;
+        case 2:  new_method = 3; break;
+        case 3:  new_method = 0; break;
+        case 4:  new_method = 7; break;
+        case 5:  new_method = 6; break;
+        case 6:  new_method = 4; break;
+        case 7:  new_method = 5; break;
+        default: new_method = 0;
+    }
+    g_object_set (flip, "method", new_method, NULL);
+}
+
+/* Rotate anti-clockwise 90 degrees */
+static void cb_rotate_acw (GtkButton * button, GstElement * flip) {
+    gint method, new_method;
+
+    g_object_get (flip, "method", &method, NULL);
+    switch (method) {
+        case 0:  new_method = 3; break;
+        case 1:  new_method = 0; break;
+        case 2:  new_method = 1; break;
+        case 3:  new_method = 2; break;
+        case 4:  new_method = 6; break;
+        case 5:  new_method = 7; break;
+        case 6:  new_method = 5; break;
+        case 7:  new_method = 4; break;
+        default: new_method = 0;
+    }
+    g_object_set (flip, "method", new_method, NULL);
+}
+
+/* Invert colors using coloreffects plugin preset #3
+   0 = Do nothing
+   1 = Fake heat camera toning
+   2 = Sepia toning
+   3 = Invert and slightly shade to blue
+   4 = Cross processing toning
+   5 = Yellow foreground Blue background color filter
+ */
+static void cb_invert (GtkButton * button, GstElement * invert) {
+    gint preset, new_preset;
+
+    g_object_get (invert, "preset", &preset, NULL);
+    switch (preset) {
+        case 0:  new_preset=3; break;
+        case 3:  new_preset=0; break;
+        default: new_preset=0;
+    }
+    g_object_set (invert, "preset", new_preset, NULL);
 }
 
 /* This function is called when the main window is closed */
-static void
-delete_event_cb (GtkWidget * widget, GdkEvent * event, CustomData * data)
-{
-    stop_cb (NULL, data);
+static void cb_delete_event (GtkWidget * widget, GdkEvent * event, GstElement * pipeline) {
+    gst_element_set_state (pipeline, GST_STATE_NULL);
     gtk_main_quit ();
 }
 
-/* This function is called when the slider changes its position. We perform a seek to the
- * new position here. */
-static void
-slider_cb (GtkRange * range, CustomData * data)
-{
-    gdouble value = gtk_range_get_value (GTK_RANGE (data->slider));
-    gst_element_seek_simple (data->playbin, GST_FORMAT_TIME,
-            GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT,
-            (gint64) (value * GST_SECOND));
-}
-
 /* This creates all the GTK+ widgets that compose our application, and registers the callbacks */
-static void
-create_ui (CustomData * data)
-{
-    GtkWidget *main_window;             /* The uppermost window, containing all other windows */
-    GtkWidget *main_box;                    /* VBox to hold main_hbox and the controls */
-    GtkWidget *main_hbox;                 /* HBox to hold the video sink and the stream info text widget */
-    GtkWidget *controls;                    /* HBox to hold the buttons and the slider */
-    GtkWidget *play_button, *pause_button, *stop_button;    /* Buttons */
+static void create_ui (CustomData * data) {
+    GtkWidget *main_window;     /* The uppermost window, containing all other windows */
+    GtkWidget *main_box;        /* VBox to hold main_hbox and the controls */
+    GtkWidget *main_hbox;       /* HBox to hold the video sink */
+    GtkWidget *controls;        /* HBox to hold the buttons */
+    GtkWidget *button_flip_h,    *button_flip_v,
+              *button_rotate_cw, *button_rotate_acw,
+              *button_invert;   /* Buttons */
 
     main_window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
-    g_signal_connect (G_OBJECT (main_window), "delete-event",
-            G_CALLBACK (delete_event_cb), data);
+    g_signal_connect (G_OBJECT (main_window), "delete-event", G_CALLBACK (cb_delete_event), data->pipeline);
 
-    play_button =
-            gtk_button_new_from_icon_name ("media-playback-start",
-            GTK_ICON_SIZE_SMALL_TOOLBAR);
-    g_signal_connect (G_OBJECT (play_button), "clicked", G_CALLBACK (play_cb),
-            data);
+    button_flip_h     = gtk_button_new_with_label ("\u21C6");
+    button_flip_v     = gtk_button_new_with_label ("\u21F5");
+    button_rotate_cw  = gtk_button_new_with_label ("\u2B6E");
+    button_rotate_acw = gtk_button_new_with_label ("\u2B6F");
+    button_invert     = gtk_button_new_with_label ("\u25D0");
 
-    //pause_button = gtk_button_new_from_icon_name ("media-playback-pause", GTK_ICON_SIZE_SMALL_TOOLBAR);
-    pause_button = gtk_button_new_with_label ("\u25D0");
-    g_signal_connect (G_OBJECT (pause_button), "clicked", G_CALLBACK (pause_cb),
-            data);
-
-    stop_button = gtk_button_new_from_icon_name ("media-playback-stop", GTK_ICON_SIZE_SMALL_TOOLBAR);
-    //stop_button = gtk_button_new_with_label ("\u25D0");
-
-    g_signal_connect (G_OBJECT (stop_button), "clicked", G_CALLBACK (stop_cb),
-            data);
-
-    data->slider =
-            gtk_scale_new_with_range (GTK_ORIENTATION_HORIZONTAL, 0, 100, 1);
-    gtk_scale_set_draw_value (GTK_SCALE (data->slider), 0);
-    data->slider_update_signal_id =
-            g_signal_connect (G_OBJECT (data->slider), "value-changed",
-            G_CALLBACK (slider_cb), data);
-
-    data->streams_list = gtk_text_view_new ();
-    gtk_text_view_set_editable (GTK_TEXT_VIEW (data->streams_list), FALSE);
+    g_signal_connect (G_OBJECT (button_flip_h),     "clicked", G_CALLBACK (cb_flip_h),     data->flip);
+    g_signal_connect (G_OBJECT (button_flip_v),     "clicked", G_CALLBACK (cb_flip_v),     data->flip);
+    g_signal_connect (G_OBJECT (button_rotate_cw),  "clicked", G_CALLBACK (cb_rotate_cw),  data->flip);
+    g_signal_connect (G_OBJECT (button_rotate_acw), "clicked", G_CALLBACK (cb_rotate_acw), data->flip);
+    g_signal_connect (G_OBJECT (button_invert),     "clicked", G_CALLBACK (cb_invert),     data->invert);
 
     controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_box_pack_start (GTK_BOX (controls), play_button, FALSE, FALSE, 2);
-    gtk_box_pack_start (GTK_BOX (controls), pause_button, FALSE, FALSE, 2);
-    gtk_box_pack_start (GTK_BOX (controls), stop_button, FALSE, FALSE, 2);
-    gtk_box_pack_start (GTK_BOX (controls), data->slider, TRUE, TRUE, 2);
+    gtk_box_pack_start (GTK_BOX (controls), button_flip_h,     FALSE, FALSE, 2);
+    gtk_box_pack_start (GTK_BOX (controls), button_flip_v,     FALSE, FALSE, 2);
+    gtk_box_pack_start (GTK_BOX (controls), button_rotate_cw,  FALSE, FALSE, 2);
+    gtk_box_pack_start (GTK_BOX (controls), button_rotate_acw, FALSE, FALSE, 2);
+    gtk_box_pack_start (GTK_BOX (controls), button_invert,     FALSE, FALSE, 2);
+    gtk_widget_set_halign(controls, GTK_ALIGN_CENTER);
 
     main_hbox = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_box_pack_start (GTK_BOX (main_hbox), data->sink_widget, TRUE, TRUE, 0);
-    gtk_box_pack_start (GTK_BOX (main_hbox), data->streams_list, FALSE, FALSE, 2);
 
     main_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start (GTK_BOX (main_box), main_hbox, TRUE, TRUE, 0);
-    gtk_box_pack_start (GTK_BOX (main_box), controls, FALSE, FALSE, 0);
+    gtk_box_pack_start (GTK_BOX (main_box), main_hbox, TRUE,  TRUE,  0);
+    gtk_box_pack_start (GTK_BOX (main_box), controls,  FALSE, FALSE, 0);
     gtk_container_add (GTK_CONTAINER (main_window), main_box);
     gtk_window_set_default_size (GTK_WINDOW (main_window), 1280, 720);
 
     gtk_widget_show_all (main_window);
 }
 
-/* This function is called periodically to refresh the GUI */
-static gboolean
-refresh_ui (CustomData * data)
-{
-    gint64 current = -1;
-
-    /* We do not want to update anything unless we are in the PAUSED or PLAYING states */
-    if (data->state < GST_STATE_PAUSED)
-        return TRUE;
-
-    /* If we didn't know it yet, query the stream duration */
-    if (!GST_CLOCK_TIME_IS_VALID (data->duration)) {
-        if (!gst_element_query_duration (data->playbin, GST_FORMAT_TIME,
-                        &data->duration)) {
-            g_printerr ("Could not query current duration.\n");
-        } else {
-            /* Set the range of the slider to the clip duration, in SECONDS */
-            gtk_range_set_range (GTK_RANGE (data->slider), 0,
-                    (gdouble) data->duration / GST_SECOND);
-        }
-    }
-
-    if (gst_element_query_position (data->playbin, GST_FORMAT_TIME, &current)) {
-        /* Block the "value-changed" signal, so the slider_cb function is not called
-         * (which would trigger a seek the user has not requested) */
-        g_signal_handler_block (data->slider, data->slider_update_signal_id);
-        /* Set the position of the slider to the current pipeline positoin, in SECONDS */
-        gtk_range_set_value (GTK_RANGE (data->slider),
-                (gdouble) current / GST_SECOND);
-        /* Re-enable the signal */
-        g_signal_handler_unblock (data->slider, data->slider_update_signal_id);
-    }
-    return TRUE;
-}
-
-/* This function is called when new metadata is discovered in the stream */
-static void
-tags_cb (GstElement * playbin, gint stream, CustomData * data)
-{
-    /* We are possibly in a GStreamer working thread, so we notify the main
-     * thread of this event through a message in the bus */
-    gst_element_post_message (playbin,
-            gst_message_new_application (GST_OBJECT (playbin),
-                    gst_structure_new_empty ("tags-changed")));
-}
-
 /* This function is called when an error message is posted on the bus */
-static void
-error_cb (GstBus * bus, GstMessage * msg, CustomData * data)
-{
+static void cb_error (GstBus * bus, GstMessage * msg, GstElement * pipeline) {
     GError *err;
-    gchar *debug_info;
+    gchar  *debug_info;
 
     /* Print error details on the screen */
     gst_message_parse_error (msg, &err, &debug_info);
@@ -186,142 +190,31 @@ error_cb (GstBus * bus, GstMessage * msg, CustomData * data)
     g_clear_error (&err);
     g_free (debug_info);
 
-    /* Set the pipeline to READY (which stops playback) */
-    gst_element_set_state (data->playbin, GST_STATE_READY);
+    /* Stop the pipeline */
+    gst_element_set_state (pipeline, GST_STATE_NULL);
+    /* Restart the pipeline */
+    gst_element_set_state (pipeline, GST_STATE_PLAYING);
 }
 
 /* This function is called when an End-Of-Stream message is posted on the bus.
  * We just set the pipeline to READY (which stops playback) */
-static void
-eos_cb (GstBus * bus, GstMessage * msg, CustomData * data)
-{
+static void cb_eos (GstBus * bus, GstMessage * msg, GstElement * pipeline) {
     g_print ("End-Of-Stream reached.\n");
-    gst_element_set_state (data->playbin, GST_STATE_READY);
+
+    /* Stop the pipeline */
+    gst_element_set_state (pipeline, GST_STATE_NULL);
+    /* Restart the pipeline */
+    gst_element_set_state (pipeline, GST_STATE_PLAYING);
 }
 
-/* This function is called when the pipeline changes states. We use it to
- * keep track of the current state. */
-static void
-state_changed_cb (GstBus * bus, GstMessage * msg, CustomData * data)
-{
-    GstState old_state, new_state, pending_state;
-    gst_message_parse_state_changed (msg, &old_state, &new_state, &pending_state);
-    if (GST_MESSAGE_SRC (msg) == GST_OBJECT (data->playbin)) {
-        data->state = new_state;
-        //g_print ("State set to %s\n", gst_state_get_name (new_state));
-        if (old_state == GST_STATE_READY && new_state == GST_STATE_PAUSED) {
-            /* For extra responsiveness, we refresh the GUI as soon as we reach the PAUSED state */
-            refresh_ui (data);
-        }
-    }
-}
-
-/* Extract metadata from all the streams and write it to the text widget in the GUI */
-static void
-analyze_streams (CustomData * data)
-{
-    gint i;
-    GstTagList *tags;
-    gchar *str, *total_str;
-    guint rate;
-    gint n_video, n_audio, n_text;
-    GtkTextBuffer *text;
-
-    /* Clean current contents of the widget */
-    text = gtk_text_view_get_buffer (GTK_TEXT_VIEW (data->streams_list));
-    gtk_text_buffer_set_text (text, "", -1);
-
-    /* Read some properties */
-    g_object_get (data->playbin, "n-video", &n_video, NULL);
-    g_object_get (data->playbin, "n-audio", &n_audio, NULL);
-    g_object_get (data->playbin, "n-text", &n_text, NULL);
-
-    for (i = 0; i < n_video; i++) {
-        tags = NULL;
-        /* Retrieve the stream's video tags */
-        g_signal_emit_by_name (data->playbin, "get-video-tags", i, &tags);
-        if (tags) {
-            total_str = g_strdup_printf ("video stream %d:\n", i);
-            gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-            g_free (total_str);
-            gst_tag_list_get_string (tags, GST_TAG_VIDEO_CODEC, &str);
-            total_str = g_strdup_printf ("    codec: %s\n", str ? str : "unknown");
-            gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-            g_free (total_str);
-            g_free (str);
-            gst_tag_list_free (tags);
-        }
-    }
-
-    for (i = 0; i < n_audio; i++) {
-        tags = NULL;
-        /* Retrieve the stream's audio tags */
-        g_signal_emit_by_name (data->playbin, "get-audio-tags", i, &tags);
-        if (tags) {
-            total_str = g_strdup_printf ("\naudio stream %d:\n", i);
-            gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-            g_free (total_str);
-            if (gst_tag_list_get_string (tags, GST_TAG_AUDIO_CODEC, &str)) {
-                total_str = g_strdup_printf ("    codec: %s\n", str);
-                gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-                g_free (total_str);
-                g_free (str);
-            }
-            if (gst_tag_list_get_string (tags, GST_TAG_LANGUAGE_CODE, &str)) {
-                total_str = g_strdup_printf ("    language: %s\n", str);
-                gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-                g_free (total_str);
-                g_free (str);
-            }
-            if (gst_tag_list_get_uint (tags, GST_TAG_BITRATE, &rate)) {
-                total_str = g_strdup_printf ("    bitrate: %d\n", rate);
-                gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-                g_free (total_str);
-            }
-            gst_tag_list_free (tags);
-        }
-    }
-
-    for (i = 0; i < n_text; i++) {
-        tags = NULL;
-        /* Retrieve the stream's subtitle tags */
-        g_signal_emit_by_name (data->playbin, "get-text-tags", i, &tags);
-        if (tags) {
-            total_str = g_strdup_printf ("\nsubtitle stream %d:\n", i);
-            gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-            g_free (total_str);
-            if (gst_tag_list_get_string (tags, GST_TAG_LANGUAGE_CODE, &str)) {
-                total_str = g_strdup_printf ("    language: %s\n", str);
-                gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-                g_free (total_str);
-                g_free (str);
-            }
-            gst_tag_list_free (tags);
-        }
-    }
-}
-
-/* This function is called when an "application" message is posted on the bus.
- * Here we retrieve the message posted by the tags_cb callback */
-static void
-application_cb (GstBus * bus, GstMessage * msg, CustomData * data)
-{
-    if (g_strcmp0 (gst_structure_get_name (gst_message_get_structure (msg)),
-                    "tags-changed") == 0) {
-        /* If the message is the "tags-changed" (only one we are currently issuing), update
-         * the stream info GUI */
-        analyze_streams (data);
-    }
-}
-
-int
-tutorial_main (int argc, char *argv[])
-{
+int main (int argc, char *argv[]) {
+    errcode err = NO_ERROR;
     CustomData data;
     GstStateChangeReturn ret;
+    gboolean link;
     GstBus *bus;
     GstElement *camera, *flip, *invert, *convert1, *convert2, *h264enc, *h264dec,
-        *autosink, *gtkglsink, *videosink, *pipeline;
+        *videosink, *gtkglsink, *pipeline;
 
     /* Initialize GTK */
     gtk_init (&argc, &argv);
@@ -331,28 +224,14 @@ tutorial_main (int argc, char *argv[])
 
     /* Initialize our data structure */
     memset (&data, 0, sizeof (data));
-    data.duration = GST_CLOCK_TIME_NONE;
 
-    camera    = gst_element_factory_make ("v4l2src",       "camera");
-    flip      = gst_element_factory_make ("videoflip",     "flip");
-    convert1  = gst_element_factory_make ("videoconvert",  "convert1");
-    invert    = gst_element_factory_make ("coloreffects",  "invert");
-    convert2  = gst_element_factory_make ("videoconvert",  "convert2");
-    h264enc   = gst_element_factory_make ("openh264enc",   "h264enc");
-    h264dec   = gst_element_factory_make ("openh264dec",   "h264dec");
-    autosink  = gst_element_factory_make ("autovideosink", "autosink");
-
-    videosink = gst_element_factory_make ("glsinkbin", "glsinkbin");
-    gtkglsink = gst_element_factory_make ("gtkglsink", "gtkglsink");
-
-    pipeline = gst_pipeline_new ("test-pipeline");
-    gst_bin_add_many (GST_BIN (pipeline), camera, flip, convert1, invert, convert2, h264enc, h264dec, videosink, NULL);
-    gst_element_link_many (camera, flip, convert1, invert, convert2, h264enc, h264dec, videosink, NULL);
-
-    /* Create the elements */
-    //data.playbin = gst_element_factory_make ("playbin", "playbin");
-    data.playbin = pipeline;
-    data.invert = invert;
+    camera    = gst_element_factory_make ("v4l2src",      "camera");
+    flip      = gst_element_factory_make ("videoflip",    "flip");
+    convert1  = gst_element_factory_make ("videoconvert", "convert1");
+    invert    = gst_element_factory_make ("coloreffects", "invert");
+    convert2  = gst_element_factory_make ("videoconvert", "convert2");
+    videosink = gst_element_factory_make ("glsinkbin",    "glsinkbin");
+    gtkglsink = gst_element_factory_make ("gtkglsink",    "gtkglsink");
 
     /* Here we create the GTK Sink element which will provide us with a GTK widget where
      * GStreamer will render the video at and we can add to our UI.
@@ -366,10 +245,8 @@ tutorial_main (int argc, char *argv[])
          * So we get it and use it later to add it to our gui. */
         g_object_get (gtkglsink, "widget", &data.sink_widget, NULL);
     } else {
-        if (gtkglsink != NULL)
-            gst_object_unref (gtkglsink);
-        if (videosink != NULL)
-            gst_object_unref (videosink);
+        unref (gtkglsink);
+        unref (videosink);
 
         g_printerr ("Could not create gtkglsink, falling back to gtksink.\n");
 
@@ -377,70 +254,84 @@ tutorial_main (int argc, char *argv[])
         g_object_get (videosink, "widget", &data.sink_widget, NULL);
     }
 
-    if (!data.playbin || !videosink) {
+
+    pipeline  = gst_pipeline_new ("main-pipeline");
+    if (!camera || !flip || !convert1 || !invert || !convert2 ||
+        !pipeline || !videosink) {
         g_printerr ("Not all elements could be created.\n");
-        return -1;
+        err = ERROR;
+        goto exit;
     }
 
-    /* Set the URI to play */
-    //g_object_set (data.playbin, "uri",
-    //        "https://gstreamer.freedesktop.org/data/media/sintel_trailer-480p.webm",
-    //        NULL);
+#if H264_ENCRYPTION == 1
+    h264enc   = gst_element_factory_make ("openh264enc",  "h264enc");
+    h264dec   = gst_element_factory_make ("openh264dec",  "h264dec");
+    if (!h264enc || !h264dec) {
+        g_printerr ("Not all elements could be created.\n");
+        err = ERROR;
+        goto exit;
+    }
 
-    /* Set the video-sink. The playbin assumes ownership of videosink, because
-     * that's still a floating reference. */
-    //g_object_set (GST_BIN (data.playbin), "video-sink", videosink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), camera, flip, convert1, invert, convert2,
+            h264enc, h264dec, videosink, NULL);
+    link = gst_element_link_many (camera, flip, convert1, invert, convert2,
+            h264enc, h264dec, videosink, NULL);
+#else
+    gst_bin_add_many (GST_BIN (pipeline), camera, flip, convert1, invert, convert2,
+            videosink, NULL);
+    link = gst_element_link_many (camera, flip, convert1, invert, convert2,
+            videosink, NULL);
+#endif
 
-    /* Connect to interesting signals in playbin */
-    g_signal_connect (G_OBJECT (data.playbin), "video-tags-changed",
-            (GCallback) tags_cb, &data);
-    g_signal_connect (G_OBJECT (data.playbin), "audio-tags-changed",
-            (GCallback) tags_cb, &data);
-    g_signal_connect (G_OBJECT (data.playbin), "text-tags-changed",
-            (GCallback) tags_cb, &data);
+    if (!link) {
+        g_printerr ("Elements could not be linked.\n");       
+        err = ERROR;
+        goto exit;
+    }
+
+    /* Create the elements */
+    data.pipeline = pipeline;
+    data.flip     = flip;
+    data.invert   = invert;
 
     /* Create the GUI */
     create_ui (&data);
 
     /* Instruct the bus to emit signals for each received message, and connect to the interesting signals */
-    bus = gst_element_get_bus (data.playbin);
+    bus = gst_element_get_bus (pipeline);
     gst_bus_add_signal_watch (bus);
-    g_signal_connect (G_OBJECT (bus), "message::error", (GCallback) error_cb,
-            &data);
-    g_signal_connect (G_OBJECT (bus), "message::eos", (GCallback) eos_cb, &data);
-    g_signal_connect (G_OBJECT (bus), "message::state-changed",
-            (GCallback) state_changed_cb, &data);
-    g_signal_connect (G_OBJECT (bus), "message::application",
-            (GCallback) application_cb, &data);
-    gst_object_unref (bus);
+    g_signal_connect (G_OBJECT (bus), "message::error", (GCallback) cb_error, pipeline);
+    g_signal_connect (G_OBJECT (bus), "message::eos",   (GCallback) cb_eos,   pipeline);
+    unref (bus);
 
     /* Start playing */
-    ret = gst_element_set_state (data.playbin, GST_STATE_PLAYING);
+    ret = gst_element_set_state (pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
         g_printerr ("Unable to set the pipeline to the playing state.\n");
-        gst_object_unref (data.playbin);
-        return -1;
+        err = ERROR;
+        goto exit;
     }
-
-    /* Register a function that GLib will call every second */
-    g_timeout_add_seconds (1, (GSourceFunc) refresh_ui, &data);
 
     /* Start the GTK main loop. We will not regain control until gtk_main_quit is called. */
     gtk_main ();
 
+exit:
+    /* Stop pipeline */
+    gst_element_set_state (data.pipeline, GST_STATE_NULL);
+
     /* Free resources */
-    gst_element_set_state (data.playbin, GST_STATE_NULL);
-    gst_object_unref (data.playbin);
-
-    return 0;
-}
-
-int
-main (int argc, char *argv[])
-{
-#if defined(__APPLE__) && TARGET_OS_MAC && !TARGET_OS_IPHONE
-    return gst_macos_main ((GstMainFunc) tutorial_main, argc, argv, NULL);
-#else
-    return tutorial_main (argc, argv);
+    unref (pipeline);
+    unref (gtkglsink);
+    unref (videosink);
+    unref (convert2);
+    unref (invert);
+    unref (convert1);
+    unref (flip);
+    unref (camera);
+#if H264_ENCRYPTION == 1
+    unref (h264dec);
+    unref (h264enc);
 #endif
+
+    return err;
 }
