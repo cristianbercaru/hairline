@@ -1,5 +1,5 @@
-#include <gtk/gtk.h>
 #include <gst/gst.h>
+#include <gtk/gtk.h>
 
 typedef enum {
     NO_ERROR = 0,
@@ -19,7 +19,7 @@ typedef struct _CustomData {
     GtkWidget  *sink_widget; /* Widget where video will be displayed */
 } CustomData;
 
-/* Use videoflip plugin to flip and rotate the image based on the current position
+/* Flip and rotate image using methods in videoflip plugin
    0 = Identity, no rotation
    1 = Rotate clockwise 90 degrees
    2 = Rotate 180 degrees
@@ -225,18 +225,21 @@ int main (int argc, char *argv[]) {
     /* Initialize our data structure */
     memset (&data, 0, sizeof (data));
 
+    /* Instantiate pipeline elements, the quivalent of
+       v4l2src ! videoflip ! videoconvert ! coloreffects ! videoconvert ! glsinkbin
+     */
     camera    = gst_element_factory_make ("v4l2src",      "camera");
     flip      = gst_element_factory_make ("videoflip",    "flip");
     convert1  = gst_element_factory_make ("videoconvert", "convert1");
     invert    = gst_element_factory_make ("coloreffects", "invert");
     convert2  = gst_element_factory_make ("videoconvert", "convert2");
     videosink = gst_element_factory_make ("glsinkbin",    "glsinkbin");
-    gtkglsink = gst_element_factory_make ("gtkglsink",    "gtkglsink");
 
     /* Here we create the GTK Sink element which will provide us with a GTK widget where
      * GStreamer will render the video at and we can add to our UI.
      * Try to create the OpenGL version of the video sink, and fallback if that fails */
-    if (gtkglsink != NULL && videosink != NULL) {
+    gtkglsink = gst_element_factory_make ("gtkglsink", "gtkglsink");
+    if (videosink != NULL && gtkglsink != NULL) {
         g_print ("Successfully created GTK GL Sink\n");
 
         g_object_set (videosink, "sink", gtkglsink, NULL);
@@ -254,7 +257,7 @@ int main (int argc, char *argv[]) {
         g_object_get (videosink, "widget", &data.sink_widget, NULL);
     }
 
-
+    /* Create the gstreamer pipeline */
     pipeline  = gst_pipeline_new ("main-pipeline");
     if (!camera || !flip || !convert1 || !invert || !convert2 ||
         !pipeline || !videosink) {
@@ -263,6 +266,8 @@ int main (int argc, char *argv[]) {
         goto exit;
     }
 
+    /* Add the elements to the pipeline and link them
+     * Add H264 encryption/decryption plugins to pipeline if required */
 #if H264_ENCRYPTION == 1
     h264enc   = gst_element_factory_make ("openh264enc",  "h264enc");
     h264dec   = gst_element_factory_make ("openh264dec",  "h264dec");
@@ -289,7 +294,7 @@ int main (int argc, char *argv[]) {
         goto exit;
     }
 
-    /* Create the elements */
+    /* Save the handles to the elements used in GUI callbacks */
     data.pipeline = pipeline;
     data.flip     = flip;
     data.invert   = invert;
